@@ -36,6 +36,9 @@ header ipv4_t {
 header icmp_t {
     /* TODO: your code here */
     /* Hint: define ICMP header */
+    bit<8>    type;
+    bit<8>    code;
+    bit<16>   hdrChecksum;
 }
 
 struct metadata {
@@ -61,6 +64,35 @@ parser MyParser(packet_in packet,
     state start {
         /* TODO: your code here */
         /* Hint: implement your parser */
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            0x800: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol) {
+            01: parse_icmp;
+            default: accept;
+        }
+    }
+
+    state check_icmp {
+        transition select(packet.lookahead<icmp_t>().type,
+        packet.lookahead<icmp_t>().code) {
+            (8, 0): parse_icmp;
+            default: accept;
+        }
+    }
+
+    state parse_icmp {
+        packet.extract(hdr.icmp);
         transition accept;
     }
 }
@@ -86,6 +118,7 @@ control MyIngress(inout headers hdr,
     action drop() {
         /* TODO: your code here */
         /* Hint: do you need any metadata? */
+        hdr.icmp.setInvalid();
         mark_to_drop(standard_metadata);
     }
 
@@ -105,8 +138,27 @@ control MyIngress(inout headers hdr,
             /*  TODO: your code here */
             icmp_filter_table.apply();
             /*  Hint 1: check if it needs to be dropped */
+            if (hdr.icmp.isValid() && hdr.icmp.type == 8 && hdr.icmp.code == 0) {
+
             /*  Hint 2: otherwise, convert the ICMP echo request to an echo response */
+                hdr.icmp.type = 0;
+            
             /*  Hint 3: swap the source/ destionation addresses and set output port */
+                macAddr_t tmp_macAddr;
+                ip4Addr_t tmp_ip4Addr;
+
+                tmp_macAddr = hdr.ethernet.dstAddr;
+                hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
+                hdr.ethernet.srcAddr = tmp_macAddr;
+
+                tmp_ip4Addr = hdr.ipv4.dstAddr;
+                hdr.ipv4.dstAddr = hdr.ipv4.srcAddr;
+                hdr.ipv4.srcAddr = tmp_ip4Addr;
+
+                standard_metadata.egress_spec = standard_metadata.ingress_port;
+            } else {
+                drop();
+            }
         } else {
             drop();
         }
@@ -130,34 +182,34 @@ control MyEgress(inout headers hdr,
 control MyComputeChecksum(inout headers hdr, inout metadata meta) {
     apply {
         /*  TODO: uncomment the following */
-        // update_checksum(
-        //     hdr.ipv4.isValid(),
-        //     { 
-        //         hdr.ipv4.version,
-        //         hdr.ipv4.ihl,
-        //         hdr.ipv4.diffserv,
-        //         hdr.ipv4.totalLen,
-        //         hdr.ipv4.identification,
-        //         hdr.ipv4.flags,
-        //         hdr.ipv4.fragOffset,
-        //         hdr.ipv4.ttl,
-        //         hdr.ipv4.protocol,
-        //         hdr.ipv4.srcAddr,
-        //         hdr.ipv4.dstAddr 
-        //     },
-        //     hdr.ipv4.hdrChecksum,
-        //     HashAlgorithm.csum16
-        // );
+        update_checksum(
+            hdr.ipv4.isValid(),
+            { 
+                hdr.ipv4.version,
+                hdr.ipv4.ihl,
+                hdr.ipv4.diffserv,
+                hdr.ipv4.totalLen,
+                hdr.ipv4.identification,
+                hdr.ipv4.flags,
+                hdr.ipv4.fragOffset,
+                hdr.ipv4.ttl,
+                hdr.ipv4.protocol,
+                hdr.ipv4.srcAddr,
+                hdr.ipv4.dstAddr 
+            },
+            hdr.ipv4.hdrChecksum,
+            HashAlgorithm.csum16
+        );
 
-        // update_checksum_with_payload(
-        //     hdr.icmp.isValid(),
-        //     {
-        //         hdr.icmp.type,
-        //         hdr.icmp.code
-        //     },
-        //     hdr.icmp.hdrChecksum,
-        //     HashAlgorithm.csum16
-        // );
+        update_checksum_with_payload(
+            hdr.icmp.isValid(),
+            {
+                hdr.icmp.type,
+                hdr.icmp.code
+            },
+            hdr.icmp.hdrChecksum,
+            HashAlgorithm.csum16
+        );
     }
 }
 
@@ -169,6 +221,7 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         /* TODO: your code here */
+        packet.emit(hdr);
     }
 }
 
