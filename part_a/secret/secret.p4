@@ -45,11 +45,18 @@ header ipv4_t {
 header icmp_t {
     /* TODO: your code here */
     /* Hint: define ICMP header */
+    bit<8>    type;
+    bit<8>    code;
+    bit<16>   hdrChecksum;
 }
 
 header udp_t {
     /* TODO: your code here */
     /* Hint: define UDP header */
+    bit<16>   srcPort;
+    bit<16>   dstPort;
+    bit<16>   length;
+    bit<16>   hdrChecksum;
 }
 
 header secret_t {
@@ -81,6 +88,35 @@ parser MyParser(packet_in packet,
     state start {
         /* TODO: your code here */
         /* Hint: implement your parser */
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            0x800: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol) {
+            17: parse_udp;
+            default: accept;
+        }
+    }
+
+    state parse_udp {
+        packet.extract(hdr.udp);
+        transition select(hdr.udp.srcPort) {
+            TYPE_SECRET: parse_secret;
+            default: accept;
+        }
+    }
+
+    state parse_secret {
+        packet.extract(hdr.secret);
         transition accept;
     }
 }
@@ -129,12 +165,61 @@ control MyIngress(inout headers hdr,
         if(hdr.secret.isValid()) {
             /* TODO: your code here */
             /* Hint 1: verify if the secret message is destined to the switch */
-            /* Hint 2: there are two cases to handle -- DROPOFF, PICKUP */
-            /* Hint 3: what happens when you PICKUP from an empty mailbox? */
-            /* Hint 4: remember to "sanitize" your mailbox with 0xdeadbeef after every PICKUP */
-            /* Hint 5: msg_checksums are important! */
-            /* Hint 6: once everything is done, swap addresses, set port and reply to sender */
-        } 
+            if (hdr.ipv4.dstAddr == SWITCH_IP && hdr.udp.dstPort == TYPE_SECRET) {
+               
+                bit<32> message;
+                bit<32> msg_checksum;
+
+                /* Hint 2: there are two cases to handle -- DROPOFF, PICKUP */
+                if (hdr.secret.opCode == SECRET_OPT.DROPOFF) {
+                    secret_mailboxes.read(message, (bit<32>)hdr.secret.mailboxNum);
+                    if (message == 0) {
+                        hash(msg_checksum, HashAlgorithm.crc32, (bit<32>) 0, {hdr.secret.message}, (bit<32>)2147483647);
+                        secret_mailboxes.write((bit<32>)hdr.secret.mailboxNum, hdr.secret.message);
+                        msg_checksums.write((bit<32>)hdr.secret.mailboxNum, msg_checksum);
+                        hdr.secret.opCode = SECRET_OPT.SUCCESS;
+                    } else {
+                        hdr.secret.opCode = SECRET_OPT.FAILURE;
+                    }
+                } 
+                
+                if (hdr.secret.opCode == SECRET_OPT.PICKUP) {
+                /* Hint 3: what happens when you PICKUP from an empty mailbox? */
+                    bit<32> msg_checksum_check;
+                    secret_mailboxes.read(message, (bit<32>)hdr.secret.mailboxNum);
+                    msg_checksums.read(msg_checksum_check, (bit<32>)hdr.secret.mailboxNum);
+                    hash(msg_checksum, HashAlgorithm.crc32, (bit<32>) 0, {message}, (bit<32>)2147483647);
+
+                    if (message == 0 || msg_checksum != msg_checksum_check) {
+                        hdr.secret.opCode = SECRET_OPT.FAILURE;
+                    } else {
+                        hdr.secret.message = message;
+                        hdr.secret.opCode = SECRET_OPT.SUCCESS;
+                /* Hint 4: remember to "sanitize" your mailbox with 0xdeadbeef after every PICKUP */
+                        bit<32> empty_msg = 0xdeadbeef;
+                        secret_mailboxes.write((bit<32>)hdr.secret.mailboxNum, empty_msg);
+                        msg_checksums.write((bit<32>)hdr.secret.mailboxNum, (bit<32>)0);
+
+                    }
+                }
+
+                /* Hint 5: msg_checksums are important! */
+
+                /* Hint 6: once everything is done, swap addresses, set port and reply to sender */
+                macAddr_t tmp_macAddr;
+                ip4Addr_t tmp_ip4Addr;
+
+                tmp_macAddr = hdr.ethernet.dstAddr;
+                hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
+                hdr.ethernet.srcAddr = tmp_macAddr;
+
+                tmp_ip4Addr = hdr.ipv4.dstAddr;
+                hdr.ipv4.dstAddr = hdr.ipv4.srcAddr;
+                hdr.ipv4.srcAddr = tmp_ip4Addr;
+
+                //standard_metadata.egress_spec = standard_metadata.ingress_port;
+            } 
+        }
         ipv4_forward.apply();
     }
 }
@@ -184,6 +269,7 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         /* TODO: your code here */
+        packet.emit(hdr);
     }
 }
 
