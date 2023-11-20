@@ -3,6 +3,10 @@
 #include <v1model.p4>
 
 const bit<16> TYPE_IPV4 = 0x800;
+const bit<8> TYPE_TCP = 0x06;
+const bit<8> TYPE_UDP = 0x11;
+const bit<8> TYPE_ICMP = 0x01;
+const bit<16> HASH_MAX = 65535;
 
 #define SKETCH_ROW_LENGTH 65536
 #define SKETCH_CELL_BIT_WIDTH 32
@@ -38,14 +42,31 @@ header ipv4_t {
 
 header icmp_t {
     /* TODO: your code here */
+    bit<8>    type;
+    bit<8>    code;
+    bit<16>   hdrChecksum;
 }
 
 header tcp_t {
     /* TODO: your code here */
+    bit<16>   srcPort;
+    bit<16>   dstPort;
+    bit<32>   seqNo;
+    bit<32>   ackNo;
+    bit<4>    offset;
+    bit<3>    reserved;
+    bit<9>    ctrlFlag;
+    bit<16>   length;
+    bit<16>   hdrChecksum;
+    bit<16>   urgentPointer;
 }
 
 header udp_t {
     /* TODO: your code here */
+    bit<16>   srcPort;
+    bit<16>   dstPort;
+    bit<16>   length;
+    bit<16>   hdrChecksum;
 }
 
 struct metadata {
@@ -72,6 +93,39 @@ parser MyParser(packet_in packet,
     state start {
         /* TODO: your code here */
         /* Hint: implement your parser */
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            TYPE_IPV4: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol) {
+            TYPE_ICMP: parse_icmp;
+            TYPE_TCP: parse_tcp;
+            TYPE_UDP: parse_udp;
+            default: accept;
+        }
+    }
+
+    state parse_icmp {
+        packet.extract(hdr.icmp);
+        transition accept;
+    }
+
+    state parse_tcp {
+        packet.extract(hdr.tcp);
+        transition accept;
+    }
+
+    state parse_udp {
+        packet.extract(hdr.udp);
         transition accept;
     }
 }
@@ -150,10 +204,78 @@ control MyIngress(inout headers hdr,
             /* TODO: your code here */
             get_thresholds.apply();
             /* Hint 1: update the sketch and get the latest estimation */
+            
+            bit<32> count = 0;
+            bit<16> srcPort = 0;
+            bit<16> dstPort = 0;
+            ip4Addr_t srcAddr = hdr.ipv4.srcAddr;
+            ip4Addr_t dstAddr = hdr.ipv4.dstAddr;
+            bit<8> protocol = hdr.ipv4.protocol;
+
+            if (protocol == TYPE_TCP) {
+                srcPort = hdr.tcp.srcPort;
+                dstPort = hdr.tcp.dstPort;
+            }
+
+            if (protocol == TYPE_UDP) {
+                srcPort = hdr.udp.srcPort;
+                dstPort = hdr.udp.dstPort;
+            }
+
+            /* Count-Min sketch */
+            bit<32> row0_idx;
+            bit<32> row0_count;
+            bit<32> row1_idx;
+            bit<32> row1_count;
+            bit<32> row2_idx;
+            bit<32> row2_count;
+            bit<32> row3_idx;
+            bit<32> row3_count;
+
+            hash(row0_idx, HashAlgorithm.crc32, (bit<16>) 0, {srcAddr, dstAddr, srcPort, dstPort, protocol}, HASH_MAX);
+            sketch_row0.read(row0_count, row0_idx);
+            row0_count = row0_count + 1;
+            sketch_row0.write(row0_idx, row0_count);
+
+            hash(row1_idx, HashAlgorithm.crc16, (bit<16>) 0, {srcAddr, dstAddr, srcPort, dstPort, protocol}, HASH_MAX);
+            sketch_row1.read(row1_count, row1_idx);
+            row1_count = row1_count + 1;
+            sketch_row1.write(row1_idx, row1_count);
+
+            hash(row2_idx, HashAlgorithm.csum16, (bit<16>) 0, {srcAddr, dstAddr, srcPort, dstPort, protocol}, HASH_MAX);
+            sketch_row2.read(row2_count, row2_idx);
+            row2_count = row2_count + 1;
+            sketch_row2.write(row2_idx, row2_count);
+
+            hash(row3_idx, HashAlgorithm.xor16, (bit<16>) 0, {srcAddr, dstAddr, srcPort, dstPort, protocol}, HASH_MAX);
+            sketch_row3.read(row3_count, row3_idx);
+            row3_count = row3_count + 1;
+            sketch_row3.write(row3_idx, row3_count);
+
+            count = row0_count;
+            if (row1_count < count) {
+                count = row1_count;
+            }
+            if (row2_count < count) {
+                count = row2_count;
+            }
+            if (row3_count < count) {
+                count = row3_count;
+            }
+
             /* Hint 2: compare the estimation with the hh_threshold */
             /* Hint 3: to report HH flow, call mirror_heavy_flow() */
             /* Hint 4: how to ensure no duplicate HH reports to collector? */
+            if (count == hh_threshold + 1) {
+                mirror_heavy_flow();
+            }
+
             /* Hint 5: check drop_threshold, and drop if it is a potential DNS amplification attack */
+            if (count > drop_threshold) {
+                drop();
+                return;
+            }
+
             ipv4_forward.apply();
         } 
     }
@@ -185,6 +307,7 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         /* TODO: your code here */
+        packet.emit(hdr);
     }
 }
 
